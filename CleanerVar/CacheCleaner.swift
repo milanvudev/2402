@@ -4,7 +4,6 @@ struct CacheSnapshot: Sendable {
     let cacheBytes: Int64
     let temporaryBytes: Int64
     let scannedAt: Date
-
     var totalBytes: Int64 { cacheBytes + temporaryBytes }
 }
 
@@ -17,16 +16,16 @@ struct CleanupReport: Sendable {
 
 enum CacheCleanerError: LocalizedError {
     case unavailableDirectory(String)
-
     var errorDescription: String? {
         switch self {
-        case .unavailableDirectory(let name): return "The app's \(name) directory is unavailable."
+        case .unavailableDirectory(let name):
+            return "CleanerVar could not access its own \(name) directory."
         }
     }
 }
 
-/// Cleans only directories owned by this app. It never discovers or accesses
-/// another app's container, shared groups, documents, databases, or credentials.
+/// Public iOS APIs expose only CleanerVar's own sandbox.
+/// This deliberately does not enumerate or delete other apps' containers.
 enum CacheCleaner {
     static func scan() throws -> CacheSnapshot {
         let fm = FileManager.default
@@ -41,7 +40,7 @@ enum CacheCleaner {
 
     static func cleanOwnedTemporaryData() -> CleanupReport {
         let fm = FileManager.default
-        let targets: [URL] = [
+        let targets = [
             (try? ownedDirectory(.cachesDirectory, name: "Caches")),
             fm.temporaryDirectory.standardizedFileURL
         ].compactMap { $0 }
@@ -58,8 +57,10 @@ enum CacheCleaner {
                     options: []
                 )
                 for child in children {
-                    let bytes = itemSize(at: child)
                     do {
+                        let values = try child.resourceValues(forKeys: [.isSymbolicLinkKey])
+                        guard values.isSymbolicLink != true else { continue }
+                        let bytes = itemSize(at: child)
                         try fm.removeItem(at: child)
                         removedBytes += bytes
                         removedItems += 1
@@ -96,27 +97,31 @@ enum CacheCleaner {
 
         var total: Int64 = 0
         for case let url as URL in enumerator {
-            let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey])
-            guard values?.isRegularFile == true, values?.isSymbolicLink != true else { continue }
-            total += Int64(values?.fileSize ?? 0)
+            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey]),
+                  values.isRegularFile == true,
+                  values.isSymbolicLink != true else { continue }
+            total += Int64(values.fileSize ?? 0)
         }
         return total
     }
 
     private static func itemSize(at url: URL) -> Int64 {
-        guard let enumerator = FileManager.default.enumerator(
-            at: url,
-            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey],
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
-        ) else {
-            let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey])
-            return values?.isRegularFile == true && values?.isSymbolicLink != true ? Int64(values?.fileSize ?? 0) : 0
+        let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey])
+        if values?.isRegularFile == true, values?.isSymbolicLink != true {
+            return Int64(values?.fileSize ?? 0)
         }
+        guard values?.isDirectory == true,
+              let enumerator = FileManager.default.enumerator(
+                at: url,
+                includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey],
+                options: [.skipsHiddenFiles, .skipsPackageDescendants]
+              ) else { return 0 }
         var total: Int64 = 0
         for case let child as URL in enumerator {
-            let values = try? child.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey])
-            guard values?.isRegularFile == true, values?.isSymbolicLink != true else { continue }
-            total += Int64(values?.fileSize ?? 0)
+            guard let childValues = try? child.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey]),
+                  childValues.isRegularFile == true,
+                  childValues.isSymbolicLink != true else { continue }
+            total += Int64(childValues.fileSize ?? 0)
         }
         return total
     }
